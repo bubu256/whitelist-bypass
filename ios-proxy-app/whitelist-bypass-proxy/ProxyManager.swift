@@ -187,6 +187,8 @@ class ProxyManager: ObservableObject {
 
     private let autoSocksUser: String
     private let autoSocksPass: String
+    private var runtimeSocksPort: Int?
+
     private var callbackBridge: HeadlessCallbackBridge?
     private let backgroundKeepAlive = BackgroundKeepAlive()
 
@@ -205,10 +207,15 @@ class ProxyManager: ObservableObject {
         let chars = "abcdefghijklmnopqrstuvwxyz0123456789"
         autoSocksUser = String((0..<16).map { _ in chars.randomElement()! })
         autoSocksPass = String((0..<24).map { _ in chars.randomElement()! })
+        runtimeSocksPort = nil
+    }
+
+    var effectiveSocksPort: Int {
+        runtimeSocksPort ?? socksPort
     }
 
     var socksUrl: String {
-        "socks5://\(activeSocksUser):\(activeSocksPass)@127.0.0.1:\(socksPort)"
+        "socks5://\(activeSocksUser):\(activeSocksPass)@127.0.0.1:\(effectiveSocksPort)"
     }
 
     private func isPortAvailable(_ port: Int) -> Bool {
@@ -231,10 +238,37 @@ class ProxyManager: ObservableObject {
     }
 
     func connect() {
-        guard !callUrl.isEmpty else { return }
+        let url = callUrl.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if !isPortAvailable(socksPort) {
+        guard !url.isEmpty else {
+            return
+        }
+
+        guard socksPort >= 1 && socksPort <= 65535 else {
+            status = .error
+            errorMessage = "Invalid SOCKS port: \(socksPort)"
+            isRunning = false
+            appendLog("ERROR: invalid SOCKS port \(socksPort)")
+            showToast(errorMessage)
+            return
+        }
+
+        runtimeSocksPort = socksPort
+
+        if socksAuthMode == .manual {
+            guard isPortAvailable(socksPort) else {
+                status = .error
+                errorMessage = "SOCKS port \(socksPort) is busy"
+                isRunning = false
+
+                appendLog("ERROR: SOCKS port \(socksPort) is busy")
+                showToast(errorMessage)
+
+                return
+            }
+        } else if !isPortAvailable(socksPort) {
             let originalPort = socksPort
+
             let ranges: [ClosedRange<Int>] = [
                 originalPort...min(originalPort + 100, 65535),
                 1080...1380,
@@ -242,45 +276,86 @@ class ProxyManager: ObservableObject {
                 9080...9380,
                 49152...65535
             ]
-            var foundPort = false
+
+            var foundPort: Int?
+
             for range in ranges {
                 for candidatePort in range {
                     if isPortAvailable(candidatePort) {
-                        socksPort = candidatePort
-                        foundPort = true
+                        foundPort = candidatePort
                         break
                     }
                 }
-                if foundPort { break }
+
+                if foundPort != nil {
+                    break
+                }
             }
-            if !foundPort {
+
+            if let foundPort {
+                runtimeSocksPort = foundPort
+                appendLog(
+                    "Port \(originalPort) busy, using runtime port \(foundPort)"
+                )
+            } else {
                 let socketFD = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+
                 if socketFD != -1 {
                     var addr = sockaddr_in()
                     addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
                     addr.sin_family = sa_family_t(AF_INET)
                     addr.sin_port = 0
                     addr.sin_addr.s_addr = in_addr_t(INADDR_LOOPBACK).bigEndian
+
                     let bound = withUnsafePointer(to: &addr) { addrPtr in
-                        addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                            bind(socketFD, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                        addrPtr.withMemoryRebound(
+                            to: sockaddr.self,
+                            capacity: 1
+                        ) { sockaddrPtr in
+                            bind(
+                                socketFD,
+                                sockaddrPtr,
+                                socklen_t(MemoryLayout<sockaddr_in>.size)
+                            )
                         }
                     }
+
                     if bound == 0 {
                         var boundAddr = sockaddr_in()
-                        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+                        var addrLen = socklen_t(
+                            MemoryLayout<sockaddr_in>.size
+                        )
+
                         withUnsafeMutablePointer(to: &boundAddr) { ptr in
-                            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                                getsockname(socketFD, sockPtr, &addrLen)
+                            ptr.withMemoryRebound(
+                                to: sockaddr.self,
+                                capacity: 1
+                            ) { sockPtr in
+                                getsockname(
+                                    socketFD,
+                                    sockPtr,
+                                    &addrLen
+                                )
                             }
                         }
-                        socksPort = Int(UInt16(bigEndian: boundAddr.sin_port))
+
+                        runtimeSocksPort = Int(
+                            UInt16(bigEndian: boundAddr.sin_port)
+                        )
                     }
+
                     close(socketFD)
                 }
+
+                if let runtimeSocksPort {
+                    appendLog(
+                        "Port \(originalPort) busy, using runtime port \(runtimeSocksPort)"
+                    )
+                }
             }
-            appendLog("Port \(originalPort) busy, using \(socksPort)")
         }
+
+        let port = effectiveSocksPort
 
         logs.removeAll()
         pendingLogs.removeAll()
@@ -293,20 +368,37 @@ class ProxyManager: ObservableObject {
         callbackBridge = bridge
 
         backgroundKeepAlive.start()
-        detectedPlatform = CallPlatform.detect(url: callUrl)
-        appendLog("Platform: \(detectedPlatform.rawValue)")
 
-        if tunnelMode == .dc && (detectedPlatform == .telemost || detectedPlatform == .dion) {
+        detectedPlatform = CallPlatform.detect(url: url)
+        callUrl = url
+
+        appendLog("Platform: \(detectedPlatform.rawValue)")
+        appendLog("SOCKS port: \(port)")
+
+        if tunnelMode == .dc &&
+            (detectedPlatform == .telemost || detectedPlatform == .dion) {
             tunnelMode = .video
-            showToast(NSLocalizedString("dc_mode_not_supported", comment: ""))
+            showToast(
+                NSLocalizedString(
+                    "dc_mode_not_supported",
+                    comment: ""
+                )
+            )
         }
 
         IosSetDebug(debug)
 
         switch detectedPlatform {
         case .telemost:
-            IosStartTelemostHeadless(socksPort, activeSocksUser, activeSocksPass, bridge)
+            IosStartTelemostHeadless(
+                port,
+                activeSocksUser,
+                activeSocksPass,
+                bridge
+            )
+
             appendLog("Started Telemost headless joiner")
+
             let joinParams: [String: Any] = [
                 "joinLink": callUrl,
                 "displayName": displayName,
@@ -315,19 +407,44 @@ class ProxyManager: ObservableObject {
                 "dualTrack": dualTrack,
                 "reliable": reliable,
             ]
-            if let jsonData = try? JSONSerialization.data(withJSONObject: joinParams),
-               let jsonString = String(data: jsonData, encoding: .utf8) {
+
+            if let jsonData = try? JSONSerialization.data(
+                withJSONObject: joinParams
+            ),
+            let jsonString = String(
+                data: jsonData,
+                encoding: .utf8
+            ) {
                 IosSendJoinParams(jsonString)
                 appendLog("Sent join params")
             }
 
         case .vk:
-            IosStartVKHeadless(socksPort, activeSocksUser, activeSocksPass, callUrl, displayName, tunnelMode.rawValue, vp8Fps, vp8Batch, dualTrack, bridge)
+            IosStartVKHeadless(
+                port,
+                activeSocksUser,
+                activeSocksPass,
+                callUrl,
+                displayName,
+                tunnelMode.rawValue,
+                vp8Fps,
+                vp8Batch,
+                dualTrack,
+                bridge
+            )
+
             appendLog("Started VK headless joiner")
 
         case .wbstream:
-            IosStartWBStreamHeadless(socksPort, activeSocksUser, activeSocksPass, bridge)
+            IosStartWBStreamHeadless(
+                port,
+                activeSocksUser,
+                activeSocksPass,
+                bridge
+            )
+
             appendLog("Started WB Stream headless joiner")
+
             let joinParams: [String: Any] = [
                 "roomId": CallPlatform.extractRoomId(url: callUrl),
                 "displayName": displayName,
@@ -337,30 +454,56 @@ class ProxyManager: ObservableObject {
                 "dualTrack": dualTrack,
                 "reliable": reliable,
             ]
-            if let jsonData = try? JSONSerialization.data(withJSONObject: joinParams),
-               let jsonString = String(data: jsonData, encoding: .utf8) {
+
+            if let jsonData = try? JSONSerialization.data(
+                withJSONObject: joinParams
+            ),
+            let jsonString = String(
+                data: jsonData,
+                encoding: .utf8
+            ) {
                 IosSendJoinParams(jsonString)
                 appendLog("Sent join params")
             }
 
         case .dion:
-            IosStartDionHeadless(socksPort, activeSocksUser, activeSocksPass, bridge)
+            IosStartDionHeadless(
+                port,
+                activeSocksUser,
+                activeSocksPass,
+                bridge
+            )
+
             appendLog("Started DION headless joiner")
+
             let joinParams: [String: Any] = [
                 "roomId": CallPlatform.extractRoomId(url: callUrl),
                 "displayName": displayName,
                 "vp8Fps": vp8Fps,
                 "vp8Batch": vp8Batch,
             ]
-            if let jsonData = try? JSONSerialization.data(withJSONObject: joinParams),
-               let jsonString = String(data: jsonData, encoding: .utf8) {
+
+            if let jsonData = try? JSONSerialization.data(
+                withJSONObject: joinParams
+            ),
+            let jsonString = String(
+                data: jsonData,
+                encoding: .utf8
+            ) {
                 IosSendJoinParams(jsonString)
                 appendLog("Sent join params")
             }
 
         case .bitrix:
-            IosStartBitrixHeadless(socksPort, activeSocksUser, activeSocksPass, bridge)
+            IosStartBitrixHeadless(
+                port,
+                activeSocksUser,
+                activeSocksPass,
+                bridge
+            )
+
             appendLog("Started Bitrix headless joiner")
+
             let joinParams: [String: Any] = [
                 "joinLink": callUrl,
                 "displayName": displayName,
@@ -370,8 +513,14 @@ class ProxyManager: ObservableObject {
                 "dualTrack": dualTrack,
                 "reliable": reliable,
             ]
-            if let jsonData = try? JSONSerialization.data(withJSONObject: joinParams),
-               let jsonString = String(data: jsonData, encoding: .utf8) {
+
+            if let jsonData = try? JSONSerialization.data(
+                withJSONObject: joinParams
+            ),
+            let jsonString = String(
+                data: jsonData,
+                encoding: .utf8
+            ) {
                 IosSendJoinParams(jsonString)
                 appendLog("Sent join params")
             }
@@ -381,11 +530,16 @@ class ProxyManager: ObservableObject {
     func disconnect() {
         callbackBridge?.manager = nil
         callbackBridge = nil
+
         IosStopCaptchaProxy()
         IosStopHeadless()
+
         backgroundKeepAlive.stop()
+
         isRunning = false
         status = .idle
+        runtimeSocksPort = nil
+
         appendLog("Disconnected")
     }
 
@@ -459,18 +613,31 @@ class ProxyManager: ObservableObject {
     }
 
     func openTelegramProxy() {
-        let urlString = "tg://socks?server=127.0.0.1&port=\(socksPort)&user=\(activeSocksUser)&pass=\(activeSocksPass)"
+        let urlString =
+            "tg://socks?server=127.0.0.1&port=\(effectiveSocksPort)" +
+            "&user=\(activeSocksUser)&pass=\(activeSocksPass)"
+
         if let url = URL(string: urlString) {
             UIApplication.shared.open(url)
         }
-    }
+    }   
 
     func openHappProxy() {
         let creds = "\(activeSocksUser):\(activeSocksPass)"
         let credsB64 = Data(creds.utf8).base64EncodedString()
-        let proxyUri = "socks://\(credsB64)@127.0.0.1:\(socksPort)#WLB-\(socksPort)"
+
+        let proxyUri =
+            "socks://\(credsB64)@127.0.0.1:\(effectiveSocksPort)" +
+            "#WLB-\(effectiveSocksPort)"
+
         UIPasteboard.general.string = proxyUri
-        showToast(NSLocalizedString("toast_happ_params_copied", comment: ""))
+
+        showToast(
+            NSLocalizedString(
+                "toast_happ_params_copied",
+                comment: ""
+            )
+        )
     }
 
 }

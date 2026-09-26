@@ -3,7 +3,11 @@ import Foundation
 enum DefaultsKeys {
     static let lastUrl = "lastUrl"
     static let savedUrls = "savedUrls"
+
     static let socksPort = "socksPort"
+    static let autoSocksUser = "autoSocksUser"
+    static let autoSocksPass = "autoSocksPass"
+
     static let tunnelMode = "tunnelMode"
     static let displayName = "displayName"
     static let showLogs = "showLogs"
@@ -40,9 +44,45 @@ struct AppDefaults {
         set { defaults.set(newValue, forKey: DefaultsKeys.socksPort) }
     }
 
+    static var autoSocksUser: String {
+        get {
+            if let value = defaults.string(forKey: DefaultsKeys.autoSocksUser),
+               !value.isEmpty {
+                return value
+            }
+
+            let chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+            let value = String((0..<16).map { _ in chars.randomElement()! })
+            defaults.set(value, forKey: DefaultsKeys.autoSocksUser)
+            return value
+        }
+        set { defaults.set(newValue, forKey: DefaultsKeys.autoSocksUser) }
+    }
+
+    static var autoSocksPass: String {
+        get {
+            if let value = defaults.string(forKey: DefaultsKeys.autoSocksPass),
+               !value.isEmpty {
+                return value
+            }
+
+            let chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+            let value = String((0..<24).map { _ in chars.randomElement()! })
+            defaults.set(value, forKey: DefaultsKeys.autoSocksPass)
+            return value
+        }
+        set { defaults.set(newValue, forKey: DefaultsKeys.autoSocksPass) }
+    }
+
     static var tunnelMode: TunnelMode {
-        get { TunnelMode(rawValue: defaults.string(forKey: DefaultsKeys.tunnelMode) ?? "") ?? .video }
-        set { defaults.set(newValue.rawValue, forKey: DefaultsKeys.tunnelMode) }
+        get {
+            TunnelMode(
+                rawValue: defaults.string(forKey: DefaultsKeys.tunnelMode) ?? ""
+            ) ?? .video
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: DefaultsKeys.tunnelMode)
+        }
     }
 
     static var displayName: String {
@@ -56,8 +96,14 @@ struct AppDefaults {
     }
 
     static var socksAuthMode: SocksAuthMode {
-        get { SocksAuthMode(rawValue: defaults.string(forKey: DefaultsKeys.socksAuthMode) ?? "") ?? .auto }
-        set { defaults.set(newValue.rawValue, forKey: DefaultsKeys.socksAuthMode) }
+        get {
+            SocksAuthMode(
+                rawValue: defaults.string(forKey: DefaultsKeys.socksAuthMode) ?? ""
+            ) ?? .auto
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: DefaultsKeys.socksAuthMode)
+        }
     }
 
     static var socksUser: String {
@@ -71,12 +117,18 @@ struct AppDefaults {
     }
 
     static var vp8Fps: Int {
-        get { defaults.object(forKey: DefaultsKeys.vp8Fps) as? Int ?? VP8Defaults.fps }
+        get {
+            defaults.object(forKey: DefaultsKeys.vp8Fps) as? Int
+                ?? VP8Defaults.fps
+        }
         set { defaults.set(newValue, forKey: DefaultsKeys.vp8Fps) }
     }
 
     static var vp8Batch: Int {
-        get { defaults.object(forKey: DefaultsKeys.vp8Batch) as? Int ?? VP8Defaults.batch }
+        get {
+            defaults.object(forKey: DefaultsKeys.vp8Batch) as? Int
+                ?? VP8Defaults.batch
+        }
         set { defaults.set(newValue, forKey: DefaultsKeys.vp8Batch) }
     }
 
