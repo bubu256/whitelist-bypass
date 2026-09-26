@@ -1,0 +1,48 @@
+name: Build iOS Proxy IPA
+
+on:
+  push:
+    branches:
+      - ios-custom
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+
+      - name: Show tool versions
+        run: |
+          go version
+          xcodebuild -version
+
+      - name: Install gomobile and gobind
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+
+      - name: Build iOS proxy
+        run: |
+          chmod +x build-ios.sh
+          chmod +x ios-proxy-app/strip-signing.sh
+          ./build-ios.sh proxy
+
+      - name: Verify IPA
+        run: |
+          ls -lh prebuilts/whitelist-bypass-proxy.ipa
+          file prebuilts/whitelist-bypass-proxy.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: whitelist-bypass-proxy-custom
+          path: prebuilts/whitelist-bypass-proxy.ipa
+          if-no-files-found: error
