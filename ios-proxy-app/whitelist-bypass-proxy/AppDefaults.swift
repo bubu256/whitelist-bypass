@@ -2,6 +2,7 @@ import Foundation
 
 enum DefaultsKeys {
     static let lastUrl = "lastUrl"
+    static let savedUrls = "savedUrls"
     static let socksPort = "socksPort"
     static let tunnelMode = "tunnelMode"
     static let displayName = "displayName"
@@ -27,6 +28,11 @@ struct AppDefaults {
     static var lastUrl: String {
         get { defaults.string(forKey: DefaultsKeys.lastUrl) ?? "" }
         set { defaults.set(newValue, forKey: DefaultsKeys.lastUrl) }
+    }
+
+    static var savedUrls: [String] {
+        get { defaults.stringArray(forKey: DefaultsKeys.savedUrls) ?? [] }
+        set { defaults.set(newValue, forKey: DefaultsKeys.savedUrls) }
     }
 
     static var socksPort: Int {

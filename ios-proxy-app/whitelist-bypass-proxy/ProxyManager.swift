@@ -396,7 +396,6 @@ class ProxyManager: ObservableObject {
         logs.removeAll()
         pendingLogs.removeAll()
         errorMessage = ""
-        socksPort = 1080
     }
 
     @Published var captchaURL: String?

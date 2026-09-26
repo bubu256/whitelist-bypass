@@ -1,76 +1,93 @@
 import SwiftUI
 
+struct SavedCall: Identifiable, Equatable {
+    let id: UUID
+    var url: String
+
+    init(id: UUID = UUID(), url: String = "") {
+        self.id = id
+        self.url = url
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var proxyManager: ProxyManager
     @State private var showSettings = false
 
+    @State private var savedCalls: [SavedCall] = []
+    @State private var activeCallID: UUID?
+
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                VStack(spacing: 12) {
-                    HStack {
-                        ZStack(alignment: .trailing) {
-                            TextField(NSLocalizedString("hint_call_link", comment: ""), text: $proxyManager.callUrl)
-                                .textFieldStyle(.roundedBorder)
-                                .autocapitalization(.none)
-                                .disableAutocorrection(true)
-                                .keyboardType(.URL)
-                                .padding(.trailing, proxyManager.callUrl.isEmpty ? 0 : 24)
-
-                            if !proxyManager.callUrl.isEmpty {
-                                Button(action: { proxyManager.callUrl = "" }) {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundColor(.gray)
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach($savedCalls) { $call in
+                            CallRow(
+                                call: $call,
+                                isActive: activeCallID == call.id && proxyManager.isRunning,
+                                onGo: {
+                                    startCall(call)
+                                },
+                                onDelete: {
+                                    deleteCall(call)
                                 }
-                                .padding(.trailing, 6)
-                            }
+                            )
                         }
 
-                        Button(action: {
-                            if proxyManager.isRunning {
-                                proxyManager.resetAll()
-                            } else {
-                                proxyManager.connect()
-                            }
-                        }) {
-                            Text(proxyManager.isRunning ? NSLocalizedString("btn_stop", comment: "") : NSLocalizedString("btn_go", comment: ""))
-                                .fontWeight(.bold)
-                                .frame(width: 60)
+                        Button(action: addCall) {
+                            Label("Add", systemImage: "plus")
+                                .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(proxyManager.isRunning ? .red : .green)
+                        .buttonStyle(.bordered)
+                        .padding(.horizontal)
+                        .padding(.top, 4)
                     }
-                    .padding(.horizontal)
+                    .padding(.vertical, 12)
 
-                    if let captchaURL = proxyManager.captchaURL, let url = URL(string: captchaURL) {
+                    if let captchaURL = proxyManager.captchaURL,
+                       let url = URL(string: captchaURL) {
                         CaptchaWebView(url: url)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 400)
                     }
 
                     if proxyManager.status == .tunnelConnected {
-                        ProxyInfoView(proxyUrl: proxyManager.socksUrl, onCopy: proxyManager.copyProxyUrl)
+                        ProxyInfoView(
+                            proxyUrl: proxyManager.socksUrl,
+                            onCopy: proxyManager.copyProxyUrl
+                        )
 
-                        Button(action: { proxyManager.openHappProxy() }) {
-                            Label(NSLocalizedString("btn_open_in_happ", comment: ""), systemImage: "globe")
-                                .frame(maxWidth: .infinity)
+                        Button(action: {
+                            proxyManager.openHappProxy()
+                        }) {
+                            Label(
+                                NSLocalizedString("btn_open_in_happ", comment: ""),
+                                systemImage: "globe"
+                            )
+                            .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(.purple)
                         .padding(.horizontal)
 
-                        Button(action: { proxyManager.openTelegramProxy() }) {
-                            Label(NSLocalizedString("btn_open_in_telegram", comment: ""), systemImage: "paperplane.fill")
-                                .frame(maxWidth: .infinity)
+                        Button(action: {
+                            proxyManager.openTelegramProxy()
+                        }) {
+                            Label(
+                                NSLocalizedString("btn_open_in_telegram", comment: ""),
+                                systemImage: "paperplane.fill"
+                            )
+                            .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(.blue)
                         .padding(.horizontal)
                     }
-                }
-                .padding(.vertical, 12)
 
-                if proxyManager.showLogs && proxyManager.captchaURL == nil {
-                    LogView(logs: proxyManager.logs)
+                    if proxyManager.showLogs && proxyManager.captchaURL == nil {
+                        LogView(logs: proxyManager.logs)
+                    }
                 }
 
                 Spacer(minLength: 0)
@@ -78,10 +95,18 @@ struct ContentView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    StatusIndicator(status: proxyManager.status, errorMessage: proxyManager.errorMessage, statusText: proxyManager.statusText, tunnelMode: proxyManager.tunnelMode)
+                    StatusIndicator(
+                        status: proxyManager.status,
+                        errorMessage: proxyManager.errorMessage,
+                        statusText: proxyManager.statusText,
+                        tunnelMode: proxyManager.tunnelMode
+                    )
                 }
+
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { showSettings = true }) {
+                    Button(action: {
+                        showSettings = true
+                    }) {
                         Image(systemName: "gearshape")
                     }
                 }
@@ -101,13 +126,131 @@ struct ContentView: View {
                         .cornerRadius(20)
                         .padding(.bottom, 40)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
-                        .animation(.easeInOut(duration: 0.3), value: proxyManager.toastMessage)
+                        .animation(
+                            .easeInOut(duration: 0.3),
+                            value: proxyManager.toastMessage
+                        )
                 }
             }
         }
-        .onTapGesture {
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        .onAppear {
+            loadSavedCalls()
         }
+        .onTapGesture {
+            UIApplication.shared.sendAction(
+                #selector(UIResponder.resignFirstResponder),
+                to: nil,
+                from: nil,
+                for: nil
+            )
+        }
+    }
+
+    private func loadSavedCalls() {
+        let urls = AppDefaults.savedUrls
+
+        if urls.isEmpty {
+            let legacyUrl = AppDefaults.lastUrl
+
+            if !legacyUrl.isEmpty {
+                savedCalls = [SavedCall(url: legacyUrl)]
+            } else {
+                savedCalls = [SavedCall()]
+            }
+
+            saveCalls()
+            return
+        }
+
+        savedCalls = urls.map {
+            SavedCall(url: $0)
+        }
+    }
+
+    private func saveCalls() {
+        AppDefaults.savedUrls = savedCalls.map(\.url)
+    }
+
+    private func addCall() {
+        savedCalls.append(SavedCall())
+        saveCalls()
+    }
+
+    private func deleteCall(_ call: SavedCall) {
+        if activeCallID == call.id && proxyManager.isRunning {
+            proxyManager.resetAll()
+            activeCallID = nil
+        }
+
+        savedCalls.removeAll {
+            $0.id == call.id
+        }
+
+        if savedCalls.isEmpty {
+            savedCalls.append(SavedCall())
+        }
+
+        saveCalls()
+    }
+
+    private func startCall(_ call: SavedCall) {
+        let url = call.url.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !url.isEmpty else {
+            return
+        }
+
+        if activeCallID == call.id && proxyManager.isRunning {
+            proxyManager.resetAll()
+            activeCallID = nil
+            return
+        }
+
+        if proxyManager.isRunning {
+            proxyManager.resetAll()
+        }
+
+        activeCallID = call.id
+        proxyManager.callUrl = url
+        proxyManager.connect()
+
+        saveCalls()
+    }
+}
+
+struct CallRow: View {
+    @Binding var call: SavedCall
+
+    let isActive: Bool
+    let onGo: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField(
+                NSLocalizedString("hint_call_link", comment: ""),
+                text: $call.url
+            )
+            .textFieldStyle(.roundedBorder)
+            .autocapitalization(.none)
+            .disableAutocorrection(true)
+            .keyboardType(.URL)
+
+            Button(action: onGo) {
+                Text(isActive ? "STOP" : "GO")
+                    .fontWeight(.bold)
+                    .frame(width: 52)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(isActive ? .red : .green)
+
+            Button(action: onDelete) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.red)
+                    .font(.title3)
+            }
+        }
+        .padding(.horizontal)
     }
 }
 
@@ -230,6 +373,20 @@ struct SettingsView: View {
                         TextField(NSLocalizedString("hint_password", comment: ""), text: $proxyManager.manualSocksPass)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
+                    
+                        HStack {
+                            Text("SOCKS port")
+                            Spacer()
+
+                            TextField(
+                                "",
+                                value: $proxyManager.socksPort,
+                                format: .number
+                            )
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 100)
+                        }
                     }
                 }
 
