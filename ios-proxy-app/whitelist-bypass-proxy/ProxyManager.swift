@@ -219,22 +219,130 @@ class ProxyManager: ObservableObject {
     }
 
     private func isPortAvailable(_ port: Int) -> Bool {
+        guard (1...65535).contains(port) else {
+            return false
+        }
+
         let socketFD = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
-        if socketFD == -1 { return false }
-        defer { close(socketFD) }
+        guard socketFD >= 0 else {
+            return false
+        }
+
+        defer {
+            close(socketFD)
+        }
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = in_port_t(port).bigEndian
-        addr.sin_addr.s_addr = INADDR_ANY
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
 
-        let result = withUnsafePointer(to: &addr) { addrPtr in
-            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                bind(socketFD, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(
+                to: sockaddr.self,
+                capacity: 1
+            ) { sockaddrPtr in
+                bind(
+                    socketFD,
+                    sockaddrPtr,
+                    socklen_t(MemoryLayout<sockaddr_in>.size)
+                )
             }
         }
-        return result == 0
+
+        guard bindResult == 0 else {
+            return false
+        }
+
+        return listen(socketFD, 1) == 0
+    }
+
+    private func findAvailableAutoPort(preferredPort: Int) -> Int? {
+        let ranges: [ClosedRange<Int>] = [
+            preferredPort < 65535
+                ? (preferredPort + 1)...min(preferredPort + 100, 65535)
+                : 1...0,
+
+            1080...1380,
+            8080...8380,
+            9080...9380,
+            49152...65535,
+        ]
+
+        var checked = Set<Int>()
+
+        for range in ranges {
+            for port in range {
+                guard (1...65535).contains(port) else {
+                    continue
+                }
+
+                guard checked.insert(port).inserted else {
+                    continue
+                }
+
+                if isPortAvailable(port) {
+                    return port
+                }
+            }
+        }
+
+        // Final fallback: ask the OS for an ephemeral TCP port.
+        let socketFD = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+
+        guard socketFD >= 0 else {
+            return nil
+        }
+
+        defer {
+            close(socketFD)
+        }
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(
+                to: sockaddr.self,
+                capacity: 1
+            ) { sockaddrPtr in
+                bind(
+                    socketFD,
+                    sockaddrPtr,
+                    socklen_t(MemoryLayout<sockaddr_in>.size)
+                )
+            }
+        }
+
+        guard bindResult == 0 else {
+            return nil
+        }
+
+        var boundAddr = sockaddr_in()
+        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+
+        let getResult = withUnsafeMutablePointer(to: &boundAddr) { ptr in
+            ptr.withMemoryRebound(
+                to: sockaddr.self,
+                capacity: 1
+            ) { sockaddrPtr in
+                getsockname(
+                    socketFD,
+                    sockaddrPtr,
+                    &addrLen
+                )
+            }
+        }
+
+        guard getResult == 0 else {
+            return nil
+        }
+
+        return Int(UInt16(bigEndian: boundAddr.sin_port))
     }
 
     func connect() {
@@ -244,123 +352,89 @@ class ProxyManager: ObservableObject {
             return
         }
 
-        guard socksPort >= 1 && socksPort <= 65535 else {
-            status = .error
-            errorMessage = "Invalid SOCKS port: \(socksPort)"
-            isRunning = false
-            appendLog("ERROR: invalid SOCKS port \(socksPort)")
-            showToast(errorMessage)
-            return
-        }
+        callUrl = url
 
-        runtimeSocksPort = socksPort
+        logs.removeAll()
+        pendingLogs.removeAll()
 
+        errorMessage = ""
+        statusText = nil
+        captchaURL = nil
+        status = .idle
+        isRunning = false
+
+        runtimeSocksPort = nil
+
+        // MANUAL:
+        // строго используем выбранный пользователем порт.
+        // Если он занят — сразу ошибка, native headless вообще не запускаем.
         if socksAuthMode == .manual {
-            guard isPortAvailable(socksPort) else {
-                status = .error
-                errorMessage = "SOCKS port \(socksPort) is busy"
-                isRunning = false
+            guard (1...65535).contains(socksPort) else {
+                let message = "Invalid SOCKS5 port: \(socksPort)"
 
-                appendLog("ERROR: SOCKS port \(socksPort) is busy")
-                showToast(errorMessage)
+                status = .error
+                errorMessage = message
+                appendLog("ERROR: \(message)")
+                showToast(message)
 
                 return
             }
-        } else if !isPortAvailable(socksPort) {
-            let originalPort = socksPort
 
-            let ranges: [ClosedRange<Int>] = [
-                originalPort...min(originalPort + 100, 65535),
-                1080...1380,
-                8080...8380,
-                9080...9380,
-                49152...65535
-            ]
+            guard isPortAvailable(socksPort) else {
+                let message = "SOCKS5 port \(socksPort) is already in use"
 
-            var foundPort: Int?
+                status = .error
+                errorMessage = message
+                appendLog("ERROR: \(message)")
+                showToast(message)
 
-            for range in ranges {
-                for candidatePort in range {
-                    if isPortAvailable(candidatePort) {
-                        foundPort = candidatePort
-                        break
-                    }
-                }
-
-                if foundPort != nil {
-                    break
-                }
+                return
             }
 
-            if let foundPort {
-                runtimeSocksPort = foundPort
-                appendLog(
-                    "Port \(originalPort) busy, using runtime port \(foundPort)"
-                )
+            runtimeSocksPort = socksPort
+            appendLog("Using manual SOCKS5 port \(socksPort)")
+        }
+
+        // AUTO:
+        // сначала пробуем сохранённый порт.
+        // Если занят — ищем следующий свободный.
+        else {
+            guard (1...65535).contains(socksPort) else {
+                let message = "Invalid SOCKS5 port: \(socksPort)"
+
+                status = .error
+                errorMessage = message
+                appendLog("ERROR: \(message)")
+                showToast(message)
+
+                return
+            }
+
+            if isPortAvailable(socksPort) {
+                runtimeSocksPort = socksPort
+                appendLog("Using SOCKS5 port \(socksPort)")
             } else {
-                let socketFD = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+                guard let nextPort = findAvailableAutoPort(preferredPort: socksPort) else {
+                    let message = "No free SOCKS5 port found"
 
-                if socketFD != -1 {
-                    var addr = sockaddr_in()
-                    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-                    addr.sin_family = sa_family_t(AF_INET)
-                    addr.sin_port = 0
-                    addr.sin_addr.s_addr = in_addr_t(INADDR_LOOPBACK).bigEndian
+                    status = .error
+                    errorMessage = message
+                    appendLog("ERROR: \(message)")
+                    showToast(message)
 
-                    let bound = withUnsafePointer(to: &addr) { addrPtr in
-                        addrPtr.withMemoryRebound(
-                            to: sockaddr.self,
-                            capacity: 1
-                        ) { sockaddrPtr in
-                            bind(
-                                socketFD,
-                                sockaddrPtr,
-                                socklen_t(MemoryLayout<sockaddr_in>.size)
-                            )
-                        }
-                    }
-
-                    if bound == 0 {
-                        var boundAddr = sockaddr_in()
-                        var addrLen = socklen_t(
-                            MemoryLayout<sockaddr_in>.size
-                        )
-
-                        withUnsafeMutablePointer(to: &boundAddr) { ptr in
-                            ptr.withMemoryRebound(
-                                to: sockaddr.self,
-                                capacity: 1
-                            ) { sockPtr in
-                                getsockname(
-                                    socketFD,
-                                    sockPtr,
-                                    &addrLen
-                                )
-                            }
-                        }
-
-                        runtimeSocksPort = Int(
-                            UInt16(bigEndian: boundAddr.sin_port)
-                        )
-                    }
-
-                    close(socketFD)
+                    return
                 }
 
-                if let runtimeSocksPort {
-                    appendLog(
-                        "Port \(originalPort) busy, using runtime port \(runtimeSocksPort)"
-                    )
-                }
+                runtimeSocksPort = nextPort
+
+                appendLog(
+                    "Port \(socksPort) busy, using \(nextPort)"
+                )
             }
         }
 
         let port = effectiveSocksPort
 
-        logs.removeAll()
-        pendingLogs.removeAll()
-        errorMessage = ""
-        status = .idle
         isRunning = true
 
         let bridge = HeadlessCallbackBridge()
@@ -369,15 +443,18 @@ class ProxyManager: ObservableObject {
 
         backgroundKeepAlive.start()
 
-        detectedPlatform = CallPlatform.detect(url: url)
-        callUrl = url
+        detectedPlatform = CallPlatform.detect(url: callUrl)
 
-        appendLog("Platform: \(detectedPlatform.rawValue)")
-        appendLog("SOCKS port: \(port)")
+        appendLog(
+            "Platform: \(detectedPlatform.rawValue)"
+        )
 
         if tunnelMode == .dc &&
-            (detectedPlatform == .telemost || detectedPlatform == .dion) {
+            (detectedPlatform == .telemost ||
+            detectedPlatform == .dion) {
+
             tunnelMode = .video
+
             showToast(
                 NSLocalizedString(
                     "dc_mode_not_supported",
@@ -389,6 +466,7 @@ class ProxyManager: ObservableObject {
         IosSetDebug(debug)
 
         switch detectedPlatform {
+
         case .telemost:
             IosStartTelemostHeadless(
                 port,
@@ -397,7 +475,9 @@ class ProxyManager: ObservableObject {
                 bridge
             )
 
-            appendLog("Started Telemost headless joiner")
+            appendLog(
+                "Started Telemost headless joiner"
+            )
 
             let joinParams: [String: Any] = [
                 "joinLink": callUrl,
@@ -433,7 +513,9 @@ class ProxyManager: ObservableObject {
                 bridge
             )
 
-            appendLog("Started VK headless joiner")
+            appendLog(
+                "Started VK headless joiner"
+            )
 
         case .wbstream:
             IosStartWBStreamHeadless(
@@ -443,7 +525,9 @@ class ProxyManager: ObservableObject {
                 bridge
             )
 
-            appendLog("Started WB Stream headless joiner")
+            appendLog(
+                "Started WB Stream headless joiner"
+            )
 
             let joinParams: [String: Any] = [
                 "roomId": CallPlatform.extractRoomId(url: callUrl),
@@ -474,7 +558,9 @@ class ProxyManager: ObservableObject {
                 bridge
             )
 
-            appendLog("Started DION headless joiner")
+            appendLog(
+                "Started DION headless joiner"
+            )
 
             let joinParams: [String: Any] = [
                 "roomId": CallPlatform.extractRoomId(url: callUrl),
@@ -502,7 +588,9 @@ class ProxyManager: ObservableObject {
                 bridge
             )
 
-            appendLog("Started Bitrix headless joiner")
+            appendLog(
+                "Started Bitrix headless joiner"
+            )
 
             let joinParams: [String: Any] = [
                 "joinLink": callUrl,
@@ -538,6 +626,7 @@ class ProxyManager: ObservableObject {
 
         isRunning = false
         status = .idle
+
         runtimeSocksPort = nil
 
         appendLog("Disconnected")
@@ -545,11 +634,14 @@ class ProxyManager: ObservableObject {
 
     func resetAll() {
         disconnect()
+
         captchaURL = nil
         statusText = nil
         logs.removeAll()
         pendingLogs.removeAll()
         errorMessage = ""
+
+        runtimeSocksPort = nil
     }
 
     @Published var captchaURL: String?
@@ -613,22 +705,27 @@ class ProxyManager: ObservableObject {
     }
 
     func openTelegramProxy() {
+        let port = effectiveSocksPort
+
         let urlString =
-            "tg://socks?server=127.0.0.1&port=\(effectiveSocksPort)" +
-            "&user=\(activeSocksUser)&pass=\(activeSocksPass)"
+            "tg://socks?server=127.0.0.1" +
+            "&port=\(port)" +
+            "&user=\(activeSocksUser)" +
+            "&pass=\(activeSocksPass)"
 
         if let url = URL(string: urlString) {
             UIApplication.shared.open(url)
         }
-    }   
+    }  
 
     func openHappProxy() {
+        let port = effectiveSocksPort
+
         let creds = "\(activeSocksUser):\(activeSocksPass)"
         let credsB64 = Data(creds.utf8).base64EncodedString()
 
         let proxyUri =
-            "socks://\(credsB64)@127.0.0.1:\(effectiveSocksPort)" +
-            "#WLB-\(effectiveSocksPort)"
+            "socks://\(credsB64)@127.0.0.1:\(port)#WLB-\(port)"
 
         UIPasteboard.general.string = proxyUri
 
