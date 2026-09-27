@@ -30,15 +30,20 @@ struct ContentView: View {
                     ForEach($savedCalls) { $call in
                         CallRow(
                             call: $call,
-                            isActive: activeCallID == call.id && proxyManager.isRunning,
+                            isActive: activeCallID == call.id &&
+                                proxyManager.isRunning,
                             onChanged: {
                                 if activeCallID == call.id {
                                     proxyManager.callUrl = call.url
                                 }
+
                                 saveCalls()
                             },
                             onGo: {
                                 startCall(call)
+                            },
+                            onDelete: {
+                                deleteCall(call)
                             }
                         )
                     }
@@ -69,7 +74,6 @@ struct ContentView: View {
                     }
 
                     // Connected proxy information and actions.
-                    // Keep this block intact: it appears after the tunnel is ready.
                     if proxyManager.status == .tunnelConnected {
                         ProxyInfoView(
                             proxyUrl: proxyManager.socksUrl,
@@ -110,7 +114,8 @@ struct ContentView: View {
                     }
 
                     // Logs
-                    if proxyManager.showLogs && proxyManager.captchaURL == nil {
+                    if proxyManager.showLogs &&
+                        proxyManager.captchaURL == nil {
                         LogView(logs: proxyManager.logs)
                     }
 
@@ -179,6 +184,7 @@ struct ContentView: View {
             return urls.map { SavedCall(url: $0) }
         }
 
+        // Backward compatibility with older versions.
         if !AppDefaults.lastUrl.isEmpty {
             return [SavedCall(url: AppDefaults.lastUrl)]
         }
@@ -188,42 +194,61 @@ struct ContentView: View {
 
     private func saveCalls() {
         let urls = savedCalls
-            .map { $0.url.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+            .map {
+                $0.url.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+            }
+            .filter {
+                !$0.isEmpty
+            }
 
         AppDefaults.savedUrls = urls
 
-        if let first = urls.first {
-            AppDefaults.lastUrl = first
-        }
+        // Keep legacy lastUrl synchronized.
+        // Important: clear it when the list becomes empty,
+        // otherwise a deleted URL could reappear on next launch.
+        AppDefaults.lastUrl = urls.first ?? ""
     }
 
     private func addCall() {
-        savedCalls.append(SavedCall(url: ""))
+        savedCalls.append(
+            SavedCall(url: "")
+        )
     }
 
     private func deleteCall(_ call: SavedCall) {
-        if activeCallID == call.id && proxyManager.isRunning {
+        if activeCallID == call.id &&
+            proxyManager.isRunning {
             proxyManager.resetAll()
             activeCallID = nil
         }
 
-        savedCalls.removeAll { $0.id == call.id }
+        savedCalls.removeAll {
+            $0.id == call.id
+        }
+
         saveCalls()
     }
 
     private func startCall(_ call: SavedCall) {
-        let url = call.url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = call.url.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
 
         guard !url.isEmpty else {
             proxyManager.showToast(
-                NSLocalizedString("hint_call_link", comment: "")
+                NSLocalizedString(
+                    "hint_call_link",
+                    comment: ""
+                )
             )
             return
         }
 
         // Pressing GO on the active row acts as STOP.
-        if activeCallID == call.id && proxyManager.isRunning {
+        if activeCallID == call.id &&
+            proxyManager.isRunning {
             proxyManager.resetAll()
             activeCallID = nil
             return
@@ -252,21 +277,23 @@ struct CallRow: View {
     let isActive: Bool
     let onChanged: () -> Void
     let onGo: () -> Void
-
-    @EnvironmentObject var proxyManager: ProxyManager
+    let onDelete: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
 
-            // Delete is intentionally first.
+            // Delete button is intentionally first.
             Button {
-                deleteCall()
+                onDelete()
             } label: {
                 Image(systemName: "xmark")
                     .font(.caption)
                     .fontWeight(.semibold)
                     .foregroundColor(.red)
-                    .frame(width: 28, height: 36)
+                    .frame(
+                        width: 28,
+                        height: 36
+                    )
             }
             .buttonStyle(.plain)
 
@@ -282,7 +309,10 @@ struct CallRow: View {
                 .autocapitalization(.none)
                 .disableAutocorrection(true)
                 .keyboardType(.URL)
-                .padding(.trailing, call.url.isEmpty ? 0 : 24)
+                .padding(
+                    .trailing,
+                    call.url.isEmpty ? 0 : 24
+                )
                 .onChange(of: call.url) { _ in
                     onChanged()
                 }
@@ -292,8 +322,10 @@ struct CallRow: View {
                         call.url = ""
                         onChanged()
                     } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.gray)
+                        Image(
+                            systemName: "xmark.circle.fill"
+                        )
+                        .foregroundColor(.gray)
                     }
                     .padding(.trailing, 6)
                 }
@@ -304,28 +336,27 @@ struct CallRow: View {
             } label: {
                 Text(
                     isActive
-                    ? NSLocalizedString("btn_stop", comment: "")
-                    : NSLocalizedString("btn_go", comment: "")
+                        ? NSLocalizedString(
+                            "btn_stop",
+                            comment: ""
+                        )
+                        : NSLocalizedString(
+                            "btn_go",
+                            comment: ""
+                        )
                 )
                 .fontWeight(.bold)
                 .frame(width: 60)
             }
             .buttonStyle(.borderedProminent)
-            .tint(isActive ? .red : .green)
+            .tint(
+                isActive
+                    ? .red
+                    : .green
+            )
         }
         .padding(.horizontal)
     }
-
-    private func deleteCall() {
-        NotificationCenter.default.post(
-            name: .deleteSavedCall,
-            object: call.id
-        )
-    }
-}
-
-extension Notification.Name {
-    static let deleteSavedCall = Notification.Name("deleteSavedCall")
 }
 
 struct StatusIndicator: View {
@@ -375,7 +406,10 @@ struct StatusIndicator: View {
         HStack(spacing: 6) {
             Circle()
                 .fill(statusColor)
-                .frame(width: 8, height: 8)
+                .frame(
+                    width: 8,
+                    height: 8
+                )
 
             Text(displayText)
                 .font(.subheadline)
@@ -392,7 +426,12 @@ struct ProxyInfoView: View {
     var body: some View {
         HStack {
             Text(proxyUrl)
-                .font(.system(.caption, design: .monospaced))
+                .font(
+                    .system(
+                        .caption,
+                        design: .monospaced
+                    )
+                )
                 .lineLimit(1)
                 .truncationMode(.middle)
 
@@ -402,7 +441,9 @@ struct ProxyInfoView: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 6)
-        .background(Color.green.opacity(0.1))
+        .background(
+            Color.green.opacity(0.1)
+        )
         .cornerRadius(8)
         .padding(.horizontal)
     }
@@ -416,17 +457,30 @@ struct LogView: View {
     var body: some View {
         ScrollViewReader { scrollProxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(logs.indices, id: \.self) { index in
+                LazyVStack(
+                    alignment: .leading,
+                    spacing: 0
+                ) {
+                    ForEach(
+                        logs.indices,
+                        id: \.self
+                    ) { index in
                         Text(logs[index])
-                            .font(.system(.caption2, design: .monospaced))
+                            .font(
+                                .system(
+                                    .caption2,
+                                    design: .monospaced
+                                )
+                            )
                             .foregroundColor(.secondary)
                     }
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
             }
-            .background(Color(.systemGroupedBackground))
+            .background(
+                Color(.systemGroupedBackground)
+            )
             .simultaneousGesture(
                 DragGesture().onChanged { _ in
                     userScrolledUp = true
