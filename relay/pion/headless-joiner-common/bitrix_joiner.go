@@ -48,6 +48,7 @@ type BitrixHeadlessJoiner struct {
 	stopCh           chan struct{}
 	stopOnce         sync.Once
 	reconnectAttempt atomic.Int32
+	runNumber        atomic.Uint64
 }
 
 func NewBitrixHeadlessJoiner(logFn func(string, ...any), resolveFn ResolveFunc, status StatusEmitter, pcConfig PeerConnectionConfigurer) *BitrixHeadlessJoiner {
@@ -157,20 +158,42 @@ func (j *BitrixHeadlessJoiner) Close() {
 	j.resetSessionState()
 }
 
+
 func (j *BitrixHeadlessJoiner) runOnce() error {
+	runNumber := j.runNumber.Add(1)
+
+	j.logFn(
+		"bitrix-joiner: === RUN ONCE #%d reconnectAttempt=%d ===",
+		runNumber,
+		j.reconnectAttempt.Load(),
+	)
+
 	userAgent := headless.ChromeWindows.UserAgent()
+
 	c, err := bitrix.NewClient(j.portal, userAgent)
 	if err != nil {
 		return fmt.Errorf("new client: %w", err)
 	}
+
 	c.HTTP.Transport = j.makeTransport()
 	c.LogFn = j.logFn
+
+	j.logFn(
+		"bitrix-joiner: created Bitrix client for portal=%s alias=%s",
+		j.portal,
+		j.alias,
+	)
 
 	res, err := c.JoinAsGuest(j.alias, j.displayName)
 	if err != nil {
 		return fmt.Errorf("join as guest: %w", err)
 	}
-	j.logFn("bitrix-joiner: roomId=%s mediaServer=%s", res.RoomID, res.MediaServerURL)
+
+	j.logFn(
+		"bitrix-joiner: JoinAsGuest OK roomId=%s mediaServer=%s",
+		res.RoomID,
+		res.MediaServerURL,
+	)
 
 	var configureSettingEngine func(*webrtc.SettingEngine)
 	if j.PCConfig != nil {
@@ -179,6 +202,7 @@ func (j *BitrixHeadlessJoiner) runOnce() error {
 
 	var once sync.Once
 	connected := make(chan struct{})
+
 	sig, err := bitrix.ConnectSignal(bitrix.SignalConfig{
 		SignalURL:              bitrix.SignalURL(res),
 		Origin:                 j.portal,
@@ -187,7 +211,9 @@ func (j *BitrixHeadlessJoiner) runOnce() error {
 		ConfigureSettingEngine: configureSettingEngine,
 		NetDialContext:         j.makeDialContext(),
 		OnConnected: func() {
-			once.Do(func() { close(connected) })
+			once.Do(func() {
+				close(connected)
+			})
 		},
 		OnRemoteCandidate: j.OnRemoteCandidate,
 	})
@@ -209,28 +235,50 @@ func (j *BitrixHeadlessJoiner) runOnce() error {
 		sig.Close()
 		return fmt.Errorf("media session: %w", err)
 	}
+
 	ms.OnConnected = func(tun tunnel.DataTunnel) {
 		j.reconnectAttempt.Store(0)
 		j.Status.EmitStatus(common.StatusTunnelConnected)
 		j.logFn("bitrix-joiner: === TUNNEL CONNECTED === %T", tun)
+
 		if j.OnConnected != nil {
 			j.OnConnected(tun)
 		}
 	}
+
 	j.setSession(sig, ms)
 
 	done := make(chan struct{})
+
 	go func() {
 		if err := sig.Run(); err != nil {
-			j.logFn("bitrix-joiner: signal run ended: %s", common.MaskError(err))
+			j.logFn(
+				"bitrix-joiner: signal run ended: %s",
+				common.MaskError(err),
+			)
 		}
+
 		close(done)
 	}()
 
 	select {
 	case <-connected:
+		selfID := sig.LocalUserID()
+
+		if selfID == "" {
+			j.logFn(
+				"bitrix-joiner: Signal connected but LocalUserID is EMPTY",
+			)
+		} else {
+			j.logFn(
+				"bitrix-joiner: guest participant userId=%s",
+				selfID,
+			)
+		}
+
 	case <-done:
 		return fmt.Errorf("signal closed before media connect")
+
 	case <-j.stopCh:
 		sig.Close()
 		return nil
@@ -248,8 +296,10 @@ func (j *BitrixHeadlessJoiner) runOnce() error {
 	case <-j.stopCh:
 		sig.Close()
 	}
+
 	return nil
 }
+	
 
 func (j *BitrixHeadlessJoiner) makeDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
 	if j.ResolveFn == nil {
@@ -284,31 +334,70 @@ func (j *BitrixHeadlessJoiner) setSession(sig *bitrix.Signal, ms *bitrix.MediaSe
 	j.sessMu.Unlock()
 }
 
-func (j *BitrixHeadlessJoiner) startKickWatch(c *bitrix.Client, sig *bitrix.Signal, userAgent string) {
+func (j *BitrixHeadlessJoiner) startKickWatch(
+	c *bitrix.Client,
+	sig *bitrix.Signal,
+	userAgent string,
+) {
 	selfID := sig.LocalUserID()
+
 	if selfID == "" {
-		j.logFn("bitrix-joiner: self userId unknown, kick-detect disabled")
+		j.logFn(
+			"bitrix-joiner: self userId unknown, kick-detect disabled",
+		)
 		return
 	}
+
+	j.logFn(
+		"bitrix-joiner: kick watcher enabled for userId=%s",
+		selfID,
+	)
+
 	pc, err := c.PullConfig()
 	if err != nil {
-		j.logFn("bitrix-joiner: pull config failed, kick-detect disabled: %s", common.MaskError(err))
+		j.logFn(
+			"bitrix-joiner: pull config failed, kick-detect disabled: %s",
+			common.MaskError(err),
+		)
 		return
 	}
-	pull := bitrix.NewPullClient(pc, userAgent, j.portal, j.logFn)
+
+	pull := bitrix.NewPullClient(
+		pc,
+		userAgent,
+		j.portal,
+		j.logFn,
+	)
+
 	pull.SetOnUserLeave(func(uid string) {
+		j.logFn(
+			"bitrix-joiner: user leave event uid=%s self=%s",
+			uid,
+			selfID,
+		)
+
 		if uid != selfID {
 			return
 		}
-		j.logFn("bitrix-joiner: kicked from conference (userId=%s), shutting down", uid)
+
+		j.logFn(
+			"bitrix-joiner: kicked from conference (userId=%s), shutting down",
+			uid,
+		)
+
 		go j.Close()
 	})
+
 	j.sessMu.Lock()
 	j.pull = pull
 	j.sessMu.Unlock()
+
 	go func() {
 		if err := pull.Run(); err != nil {
-			j.logFn("bitrix-joiner: subws2 pull ended: %s", common.MaskError(err))
+			j.logFn(
+				"bitrix-joiner: subws2 pull ended: %s",
+				common.MaskError(err),
+			)
 		}
 	}()
 }

@@ -704,6 +704,39 @@ class ProxyManager: ObservableObject {
         }
     }
 
+    
+    func makeLogFile() -> URL? {
+        let allLogs = logs + pendingLogs
+
+        guard !allLogs.isEmpty else {
+            showToast("Лог пуст")
+            return nil
+        }
+
+        let text = allLogs.joined(separator: "\n") + "\n"
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+
+        let fileName = "whitelist-bypass-\(formatter.string(from: Date())).log"
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(fileName)
+
+        do {
+            try text.write(
+                to: fileURL,
+                atomically: true,
+                encoding: .utf8
+            )
+            return fileURL
+        } catch {
+            showToast("Не удалось сохранить лог")
+            return nil
+        }
+    }
+
+
+
     func openTelegramProxy() {
         let port = effectiveSocksPort
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct SavedCall: Identifiable {
     let id: UUID
@@ -16,6 +17,7 @@ struct ContentView: View {
     @State private var savedCalls: [SavedCall]
     @State private var showSettings = false
     @State private var activeCallID: UUID?
+    @State private var shareLogItem: LogShareItem?
 
     init() {
         _savedCalls = State(initialValue: Self.loadInitialCalls())
@@ -114,6 +116,38 @@ struct ContentView: View {
                     }
 
                     // Logs
+                    
+                    if proxyManager.showLogs &&
+                        proxyManager.captchaURL == nil {
+
+                        LogView(logs: proxyManager.logs)
+
+                        if !proxyManager.logs.isEmpty {
+                            HStack {
+                                Spacer()
+
+                                Button {
+                                    guard let url = proxyManager.makeLogFile() else {
+                                        return
+                                    }
+
+                                    shareLogItem = LogShareItem(url: url)
+                                } label: {
+                                    Label(
+                                        "Поделиться логом",
+                                        systemImage: "square.and.arrow.up"
+                                    )
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+
+                                Spacer()
+                            }
+                            .padding(.top, 4)
+                            .padding(.bottom, 4)
+                        }
+                    }
+
                     if proxyManager.showLogs &&
                         proxyManager.captchaURL == nil {
                         LogView(logs: proxyManager.logs)
@@ -145,6 +179,9 @@ struct ContentView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView()
                     .environmentObject(proxyManager)
+            }
+            .sheet(item: $shareLogItem) { item in
+                ActivityView(activityItems: [item.url])
             }
             .overlay(alignment: .bottom) {
                 if let toast = proxyManager.toastMessage {
@@ -755,5 +792,31 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+}
+
+private struct LogShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+private struct ActivityView: UIViewControllerRepresentable {
+    let activityItems: [Any]
+
+    func makeUIViewController(
+        context: Context
+    ) -> UIActivityViewController {
+        let controller = UIActivityViewController(
+            activityItems: activityItems,
+            applicationActivities: nil
+        )
+
+        return controller
+    }
+
+    func updateUIViewController(
+        _ uiViewController: UIActivityViewController,
+        context: Context
+    ) {
     }
 }

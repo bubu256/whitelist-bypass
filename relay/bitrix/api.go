@@ -316,28 +316,127 @@ func (c *Client) registerGuest(p conferenceParams, displayName string) (userToke
 	form.Set("videoconf_id", p.ConferenceID)
 	form.Set("call_chat_id", p.ChatID)
 	form.Set("alias", p.Alias)
+
+	// Intentionally empty for now.
+	// We need to determine whether Bitrix expects a persistent guest identity here.
 	form.Set("user_hash", "")
+
 	if displayName != "" {
 		form.Set("name", displayName)
 	}
+
+	c.LogFn(
+		"[guest] registering guest conferenceId=%s chatId=%s alias=%s name=%q user_hash=<empty>",
+		p.ConferenceID,
+		p.ChatID,
+		p.Alias,
+		displayName,
+	)
+
 	body, status, err := c.restForm("call.user.register", form)
 	if err != nil {
 		return "", err
 	}
+
 	var out struct {
-		Result struct {
-			UserToken string `json:"userToken"`
-		} `json:"result"`
-		Error            string `json:"error"`
-		ErrorDescription string `json:"error_description"`
+		Result           json.RawMessage `json:"result"`
+		Error            string          `json:"error"`
+		ErrorDescription string          `json:"error_description"`
 	}
+
 	if err := json.Unmarshal(body, &out); err != nil {
-		return "", fmt.Errorf("register guest: %w (status %d, body %s)", err, status, common.BodySnippet(body))
+		return "", fmt.Errorf(
+			"register guest: %w (status %d, body %s)",
+			err,
+			status,
+			common.BodySnippet(body),
+		)
 	}
-	if out.Result.UserToken == "" {
-		return "", fmt.Errorf("register guest: no userToken (status %d, err %s %s)", status, out.Error, out.ErrorDescription)
+
+	// Inspect the result structure without exposing the userToken itself.
+	var result map[string]json.RawMessage
+	if len(out.Result) > 0 && string(out.Result) != "null" {
+		if err := json.Unmarshal(out.Result, &result); err != nil {
+			return "", fmt.Errorf(
+				"register guest: invalid result: %w (status %d, body %s)",
+				err,
+				status,
+				common.BodySnippet(body),
+			)
+		}
 	}
-	return out.Result.UserToken, nil
+
+	fields := make([]string, 0, len(result))
+	for key := range result {
+		fields = append(fields, key)
+	}
+
+	c.LogFn(
+		"[guest] register response status=%d error=%q errorDescription=%q resultFields=%v",
+		status,
+		out.Error,
+		out.ErrorDescription,
+		fields,
+	)
+
+	// Log potentially useful identity fields, but never log credentials/tokens.
+	for _, key := range []string{
+		"userId",
+		"userID",
+		"id",
+		"userHash",
+		"user_hash",
+	} {
+		if raw, ok := result[key]; ok {
+			c.LogFn("[guest] register result %s=%s", key, string(raw))
+		}
+	}
+
+	var parsed struct {
+		UserToken string `json:"userToken"`
+	}
+
+	if err := json.Unmarshal(out.Result, &parsed); err != nil {
+		return "", fmt.Errorf(
+			"register guest: parse result: %w (status %d, body %s)",
+			err,
+			status,
+			common.BodySnippet(body),
+		)
+	}
+
+	if parsed.UserToken == "" {
+		return "", fmt.Errorf(
+			"register guest: no userToken (status %d, err %s %s, resultFields=%v)",
+			status,
+			out.Error,
+			out.ErrorDescription,
+			fields,
+		)
+	}
+
+	c.LogFn(
+		"[guest] registered successfully userTokenLength=%d",
+		len(parsed.UserToken),
+	)
+
+	// Record cookies created/updated during guest registration.
+	if portalURL, parseErr := url.Parse(c.portal); parseErr == nil && c.HTTP != nil && c.HTTP.Jar != nil {
+		cookies := c.HTTP.Jar.Cookies(portalURL)
+
+		cookieNames := make([]string, 0, len(cookies))
+		for _, cookie := range cookies {
+			cookieNames = append(cookieNames, cookie.Name)
+		}
+
+		c.LogFn(
+			"[guest] cookies after register count=%d names=%v",
+			len(cookies),
+			cookieNames,
+		)
+	}
+
+	return parsed.UserToken, nil
 }
 
 func (c *Client) tryJoinCall(chatID string) (callInfo, error) {
