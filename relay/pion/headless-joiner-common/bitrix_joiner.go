@@ -12,11 +12,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	headless "github.com/kulikov0/headless-client"
-	"github.com/kulikov0/headless-client/webrtc"
 	"whitelist-bypass/relay/bitrix"
 	"whitelist-bypass/relay/common"
 	"whitelist-bypass/relay/tunnel"
+
+	headless "github.com/kulikov0/headless-client"
+	"github.com/kulikov0/headless-client/webrtc"
 )
 
 type BitrixHeadlessJoiner struct {
@@ -49,6 +50,9 @@ type BitrixHeadlessJoiner struct {
 	stopOnce         sync.Once
 	reconnectAttempt atomic.Int32
 	runNumber        atomic.Uint64
+
+	guestHash string
+	guestID   string
 }
 
 func NewBitrixHeadlessJoiner(logFn func(string, ...any), resolveFn ResolveFunc, status StatusEmitter, pcConfig PeerConnectionConfigurer) *BitrixHeadlessJoiner {
@@ -158,7 +162,6 @@ func (j *BitrixHeadlessJoiner) Close() {
 	j.resetSessionState()
 }
 
-
 func (j *BitrixHeadlessJoiner) runOnce() error {
 	runNumber := j.runNumber.Add(1)
 
@@ -184,10 +187,40 @@ func (j *BitrixHeadlessJoiner) runOnce() error {
 		j.alias,
 	)
 
-	res, err := c.JoinAsGuest(j.alias, j.displayName)
+	guestHash := j.guestHash
+
+	res, guest, err := c.JoinAsGuest(
+		j.alias,
+		j.displayName,
+		guestHash,
+	)
 	if err != nil {
 		return fmt.Errorf("join as guest: %w", err)
 	}
+
+	if guest.Hash != "" {
+		j.guestHash = guest.Hash
+	}
+
+	if guest.ID != "" {
+		if j.guestID != "" && j.guestID != guest.ID {
+			j.logFn(
+				"bitrix-joiner: WARNING guest identity changed old=%s new=%s",
+				j.guestID,
+				guest.ID,
+			)
+		}
+
+		j.guestID = guest.ID
+	}
+
+	j.logFn(
+		"bitrix-joiner: guest registration id=%s created=%v hashLength=%d reusedHash=%v",
+		guest.ID,
+		guest.Created,
+		len(guest.Hash),
+		guestHash != "",
+	)
 
 	j.logFn(
 		"bitrix-joiner: JoinAsGuest OK roomId=%s mediaServer=%s",
@@ -299,7 +332,6 @@ func (j *BitrixHeadlessJoiner) runOnce() error {
 
 	return nil
 }
-	
 
 func (j *BitrixHeadlessJoiner) makeDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
 	if j.ResolveFn == nil {

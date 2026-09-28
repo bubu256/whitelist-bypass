@@ -116,7 +116,10 @@ struct ContentView: View {
                     }
 
                     // Logs
-                    
+                    if proxyManager.showLogs &&
+                        proxyManager.captchaURL == nil {
+                        LogView(logs: proxyManager.logs)
+                    }
                     if proxyManager.showLogs &&
                         proxyManager.captchaURL == nil {
 
@@ -146,11 +149,6 @@ struct ContentView: View {
                             .padding(.top, 4)
                             .padding(.bottom, 4)
                         }
-                    }
-
-                    if proxyManager.showLogs &&
-                        proxyManager.captchaURL == nil {
-                        LogView(logs: proxyManager.logs)
                     }
 
                     Spacer(minLength: 0)

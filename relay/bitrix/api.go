@@ -12,9 +12,10 @@ import (
 	"strconv"
 	"strings"
 
+	"whitelist-bypass/relay/common"
+
 	"github.com/google/uuid"
 	headless "github.com/kulikov0/headless-client"
-	"whitelist-bypass/relay/common"
 )
 
 const (
@@ -56,6 +57,14 @@ type JoinResult struct {
 	RoomData       string `json:"roomData"`
 	RoomID         string `json:"roomId"`
 	MediaServerURL string `json:"mediaServerUrl"`
+}
+
+type GuestRegistration struct {
+	ID            string
+	Hash          string
+	UserToken     string
+	Created       bool
+	HasCustomName bool
 }
 
 type conferenceParams struct {
@@ -125,24 +134,40 @@ func SignalURL(res JoinResult) string {
 	return res.MediaServerURL + "?" + q.Encode()
 }
 
-func (c *Client) JoinAsGuest(alias, displayName string) (JoinResult, error) {
+func (c *Client) JoinAsGuest(
+	alias,
+	displayName,
+	userHash string,
+) (JoinResult, GuestRegistration, error) {
 	var res JoinResult
+	var guest GuestRegistration
+
 	conf, err := c.fetchConference(alias)
 	if err != nil {
-		return res, err
+		return res, guest, err
 	}
+
 	c.chatID = conf.ChatID
 	c.conferenceID = conf.ConferenceID
-	userToken, err := c.registerGuest(conf, displayName)
+
+	guest, err = c.registerGuest(conf, displayName, userHash)
 	if err != nil {
-		return res, err
+		return res, guest, err
 	}
+
 	info, err := c.tryJoinCall(conf.ChatID)
 	if err != nil {
-		return res, err
+		return res, guest, err
 	}
-	info.UserToken = userToken
-	return c.slbJoin(info, false)
+
+	info.UserToken = guest.UserToken
+
+	res, err = c.slbJoin(info, false)
+	if err != nil {
+		return res, guest, err
+	}
+
+	return res, guest, nil
 }
 
 func (c *Client) JoinAsHost(alias string) (JoinResult, error) {
@@ -310,42 +335,57 @@ func (c *Client) fetchConference(alias string) (conferenceParams, error) {
 	return p, nil
 }
 
-func (c *Client) registerGuest(p conferenceParams, displayName string) (userToken string, err error) {
+func (c *Client) registerGuest(
+	p conferenceParams,
+	displayName string,
+	userHash string,
+) (GuestRegistration, error) {
+	var guest GuestRegistration
+
 	form := url.Values{}
 	form.Set("call_auth_id", "guest")
 	form.Set("videoconf_id", p.ConferenceID)
 	form.Set("call_chat_id", p.ChatID)
 	form.Set("alias", p.Alias)
-
-	// Intentionally empty for now.
-	// We need to determine whether Bitrix expects a persistent guest identity here.
-	form.Set("user_hash", "")
+	form.Set("user_hash", userHash)
 
 	if displayName != "" {
 		form.Set("name", displayName)
 	}
 
+	hashInfo := "<empty>"
+	if userHash != "" {
+		hashInfo = fmt.Sprintf("provided len=%d", len(userHash))
+	}
+
 	c.LogFn(
-		"[guest] registering guest conferenceId=%s chatId=%s alias=%s name=%q user_hash=<empty>",
+		"[guest] registering guest conferenceId=%s chatId=%s alias=%s name=%q user_hash=%s",
 		p.ConferenceID,
 		p.ChatID,
 		p.Alias,
 		displayName,
+		hashInfo,
 	)
 
 	body, status, err := c.restForm("call.user.register", form)
 	if err != nil {
-		return "", err
+		return guest, err
 	}
 
 	var out struct {
-		Result           json.RawMessage `json:"result"`
-		Error            string          `json:"error"`
-		ErrorDescription string          `json:"error_description"`
+		Result struct {
+			ID            json.RawMessage `json:"id"`
+			Hash          string          `json:"hash"`
+			Created       bool            `json:"created"`
+			HasCustomName bool            `json:"hasCustomName"`
+			UserToken     string          `json:"userToken"`
+		} `json:"result"`
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
 	}
 
 	if err := json.Unmarshal(body, &out); err != nil {
-		return "", fmt.Errorf(
+		return guest, fmt.Errorf(
 			"register guest: %w (status %d, body %s)",
 			err,
 			status,
@@ -353,75 +393,49 @@ func (c *Client) registerGuest(p conferenceParams, displayName string) (userToke
 		)
 	}
 
-	// Inspect the result structure without exposing the userToken itself.
-	var result map[string]json.RawMessage
-	if len(out.Result) > 0 && string(out.Result) != "null" {
-		if err := json.Unmarshal(out.Result, &result); err != nil {
-			return "", fmt.Errorf(
-				"register guest: invalid result: %w (status %d, body %s)",
-				err,
-				status,
-				common.BodySnippet(body),
-			)
-		}
-	}
-
-	fields := make([]string, 0, len(result))
-	for key := range result {
-		fields = append(fields, key)
-	}
-
-	c.LogFn(
-		"[guest] register response status=%d error=%q errorDescription=%q resultFields=%v",
-		status,
-		out.Error,
-		out.ErrorDescription,
-		fields,
-	)
-
-	// Log potentially useful identity fields, but never log credentials/tokens.
-	for _, key := range []string{
-		"userId",
-		"userID",
-		"id",
-		"userHash",
-		"user_hash",
-	} {
-		if raw, ok := result[key]; ok {
-			c.LogFn("[guest] register result %s=%s", key, string(raw))
-		}
-	}
-
-	var parsed struct {
-		UserToken string `json:"userToken"`
-	}
-
-	if err := json.Unmarshal(out.Result, &parsed); err != nil {
-		return "", fmt.Errorf(
-			"register guest: parse result: %w (status %d, body %s)",
-			err,
-			status,
-			common.BodySnippet(body),
-		)
-	}
-
-	if parsed.UserToken == "" {
-		return "", fmt.Errorf(
-			"register guest: no userToken (status %d, err %s %s, resultFields=%v)",
+	if out.Result.UserToken == "" {
+		return guest, fmt.Errorf(
+			"register guest: no userToken (status %d, err %s %s)",
 			status,
 			out.Error,
 			out.ErrorDescription,
-			fields,
 		)
 	}
 
+	id := ""
+	if len(out.Result.ID) > 0 {
+		var stringID string
+
+		if err := json.Unmarshal(out.Result.ID, &stringID); err == nil {
+			id = stringID
+		} else {
+			id = string(out.Result.ID)
+		}
+	}
+
+	guest.ID = id
+	guest.Hash = out.Result.Hash
+	guest.Created = out.Result.Created
+	guest.HasCustomName = out.Result.HasCustomName
+	guest.UserToken = out.Result.UserToken
+
 	c.LogFn(
-		"[guest] registered successfully userTokenLength=%d",
-		len(parsed.UserToken),
+		"[guest] register result id=%s created=%v hasCustomName=%v hashLength=%d",
+		guest.ID,
+		guest.Created,
+		guest.HasCustomName,
+		len(guest.Hash),
 	)
 
-	// Record cookies created/updated during guest registration.
-	if portalURL, parseErr := url.Parse(c.portal); parseErr == nil && c.HTTP != nil && c.HTTP.Jar != nil {
+	c.LogFn(
+		"[guest] registered successfully userTokenLength=%d",
+		len(guest.UserToken),
+	)
+
+	if portalURL, parseErr := url.Parse(c.portal); parseErr == nil &&
+		c.HTTP != nil &&
+		c.HTTP.Jar != nil {
+
 		cookies := c.HTTP.Jar.Cookies(portalURL)
 
 		cookieNames := make([]string, 0, len(cookies))
@@ -436,7 +450,7 @@ func (c *Client) registerGuest(p conferenceParams, displayName string) (userToke
 		)
 	}
 
-	return parsed.UserToken, nil
+	return guest, nil
 }
 
 func (c *Client) tryJoinCall(chatID string) (callInfo, error) {
